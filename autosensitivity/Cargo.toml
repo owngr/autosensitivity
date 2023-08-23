@@ -8,3 +8,4 @@ edition = "2021"
 [dependencies]
 # Used for parsing command line argument
 clap = { version = "4.0", features = ["derive"] }
+home = "0.5.5"
