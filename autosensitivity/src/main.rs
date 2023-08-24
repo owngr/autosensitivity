@@ -2,17 +2,20 @@ use clap::Parser;
 use home::home_dir;
 use std::fs;
 use std::fs::File;
-use std::io::Write;
-use std::{path::PathBuf, process::{Command, Stdio}};
+use std::io::{Error, ErrorKind, Write};
+use std::{
+    path::PathBuf,
+    process::{Command, Stdio},
+};
 
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about=None, arg_required_else_help = true)]
+#[command(author, version, about="A sensitivity config manager for X11", long_about=None, arg_required_else_help = true)]
 struct Args {
-    /// Save config
+    /// Save given xinput device config
     #[arg(short, long)]
     save: Option<String>,
 
-    /// Load config
+    /// Load all saved config
     #[arg(short, long, action)]
     load: bool,
 }
@@ -25,10 +28,9 @@ fn main() {
     if let Some(save) = args.save {
         println!("Saving config {}", save);
         let _ = save_config(save, config_dir);
-    }
-
-    if args.load {
-        println!("Loading file")
+    } else if args.load {
+        println!("Loading config files...");
+        let _ = load_configs(config_dir);
     }
 }
 
@@ -44,7 +46,51 @@ fn load_config_directory() -> PathBuf {
     panic!("Couldn't load config directory")
 }
 
-fn save_config(input_name: String, config_dir: PathBuf) -> std::io::Result<()> {
+fn load_configs(config_dir: PathBuf) -> std::io::Result<()> {
+    let config_paths = fs::read_dir(config_dir).unwrap();
+
+    for path_result in config_paths {
+        let result = path_result.unwrap();
+        let path = result.path();
+        let input_name = path.file_stem().unwrap().to_str();
+        let contents =
+            fs::read_to_string(path.to_owned()).expect("Should have been able to read the file");
+        match input_name {
+            Some(input) => {
+                let input_id = find_id(input.to_string());
+                match input_id {
+                    Ok(v) => {
+                        load_config(v, contents);
+                        println!("Loaded config for device {}", input);
+                    }
+                    Err(_) => println!("Device {} is not present", input),
+                }
+            }
+            None => panic!("Couldn't print filename"),
+        }
+    }
+    return Ok(());
+}
+
+fn load_config(input_id: String, contents: String) {
+    let vec = contents.split("\t").collect::<Vec<&str>>();
+    let key = vec[0];
+    let value = vec[1];
+
+    let set_input = Command::new("xinput")
+        .arg("--set-prop")
+        .arg(input_id)
+        .arg(key)
+        .arg(value)
+        .output()
+        .expect("Failed to set value, is this input id used ?");
+
+    if !set_input.status.success() {
+        panic!("Xinput: {}", String::from_utf8_lossy(&set_input.stderr));
+    }
+}
+
+fn find_id(input_name: String) -> Result<String, Error> {
     let output_list = Command::new("xinput")
         .arg("list")
         .arg("--id-only")
@@ -52,11 +98,25 @@ fn save_config(input_name: String, config_dir: PathBuf) -> std::io::Result<()> {
         .output()
         .expect("failed to run xinput, is it installed ?");
     if !output_list.status.success() {
-        panic!("Xinput: {}", String::from_utf8_lossy(&output_list.stderr));
+        return Err(Error::new(
+            ErrorKind::Other,
+            "Couldn't find id for input name",
+        ));
     }
 
     let mut input_id = String::from_utf8_lossy(&output_list.stdout).to_string();
     input_id.pop();
+    return Ok(input_id);
+}
+
+fn save_config(input_name: String, config_dir: PathBuf) -> std::io::Result<()> {
+    let input_id_res = find_id(input_name.clone());
+
+    if !input_id_res.is_ok() {
+        panic!("Couldn't find id for input {}", input_name.clone());
+    }
+
+    let input_id = input_id_res.unwrap();
 
     let list_props = Command::new("xinput")
         .arg("list-props")
@@ -75,19 +135,20 @@ fn save_config(input_name: String, config_dir: PathBuf) -> std::io::Result<()> {
     let output_accel_speed = grep_accel_speed.wait_with_output().unwrap();
 
     if !output_accel_speed.status.success() {
-        panic!("Xinput: {}", String::from_utf8_lossy(&output_accel_speed.stderr));
+        panic!(
+            "Xinput: {}",
+            String::from_utf8_lossy(&output_accel_speed.stderr)
+        );
     }
-
 
     let binding = String::from_utf8_lossy(&output_accel_speed.stdout);
     let accel_speed_option = binding.split("\t").last();
     if let Some(accel_speed) = accel_speed_option {
-        let mut input_path = config_dir;
+        let mut input_path = config_dir.to_owned();
         input_path.push(input_name);
 
         let mut config_file = File::create(input_path)?;
         write!(config_file, "libinput Accel Speed\t{}", accel_speed)
-
     } else {
         panic!("Couldn't save the config to a file")
     }
